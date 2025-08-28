@@ -149,9 +149,7 @@ const HomePage = () => {
                       <div className="flex items-center gap-4 text-sm text-muted-foreground">
                         <span>{story.score} points</span>
                         <span>by {story.by}</span>
-                        {story.descendants !== undefined && (
-                          <span>{story.descendants} comments</span>
-                        )}
+                        
                       </div>
                     </div>
                     

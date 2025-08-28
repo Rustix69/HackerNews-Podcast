@@ -1,0 +1,13 @@
+/home/traderx/amplify/backend/target/debug/deps/libpom-7d62aa102228680e.rmeta: /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/lib.rs /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/range.rs /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/result.rs /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/set.rs /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/parser.rs /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/char_class.rs /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/utf8.rs
+
+/home/traderx/amplify/backend/target/debug/deps/libpom-7d62aa102228680e.rlib: /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/lib.rs /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/range.rs /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/result.rs /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/set.rs /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/parser.rs /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/char_class.rs /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/utf8.rs
+
+/home/traderx/amplify/backend/target/debug/deps/pom-7d62aa102228680e.d: /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/lib.rs /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/range.rs /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/result.rs /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/set.rs /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/parser.rs /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/char_class.rs /home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/utf8.rs
+
+/home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/lib.rs:
+/home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/range.rs:
+/home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/result.rs:
+/home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/set.rs:
+/home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/parser.rs:
+/home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/char_class.rs:
+/home/traderx/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/pom-3.4.0/src/utf8.rs:

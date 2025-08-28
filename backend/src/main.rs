@@ -1,14 +1,15 @@
 use axum::{
-    extract::{Path, Query},
+    extract::{Json, Query, Path},
     http::StatusCode,
-    response::Json,
-    routing::get,
+    response::Json as AxumJson,
+    routing::{get, post},
     Router,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tower_http::cors::CorsLayer;
 use tracing::{info, error};
+use std::env;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct HNStory {
@@ -23,9 +24,33 @@ struct HNStory {
     kids: Option<Vec<u32>>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct HNComment {
+    id: u32,
+    by: Option<String>,
+    time: Option<u64>,
+    text: Option<String>,
+    kids: Option<Vec<u32>>,
+    parent: Option<u32>,
+}
+
 #[derive(Debug, Serialize)]
 struct ApiError {
     error: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContentGenerationRequest {
+    story_id: u32,
+    comments: Vec<String>,
+}
+
+// Update the ContentGenerationResponse struct to match the new implementation
+#[derive(Debug, Serialize, Deserialize)]
+struct ContentGenerationResponse {
+    message: String,
+    context_added: bool,
+    story_id: u32,
 }
 
 // HackerNews API client
@@ -56,14 +81,32 @@ impl HNClient {
         Ok(story)
     }
 
+    async fn get_comment(&self, id: u32) -> Result<HNComment, anyhow::Error> {
+        let url = format!("{}/item/{}.json", self.base_url, id);
+        let response = self.client.get(&url).send().await?;
+        let comment: HNComment = response.json().await?;
+        Ok(comment)
+    }
+
     async fn get_stories_batch(&self, ids: &[u32]) -> Result<Vec<HNStory>, anyhow::Error> {
         let futures: Vec<_> = ids.iter().map(|&id| self.get_story(id)).collect();
         let results = futures::future::try_join_all(futures).await?;
         Ok(results)
     }
+
+    async fn get_comments_for_story(&self, story: &HNStory) -> Result<Vec<HNComment>, anyhow::Error> {
+        if let Some(kids) = &story.kids {
+            // Fetch ALL comments without limit
+            let comment_futures: Vec<_> = kids.iter().map(|&id| self.get_comment(id)).collect();
+            let comments = futures::future::try_join_all(comment_futures).await?;
+            Ok(comments.into_iter().filter(|c| c.text.is_some()).collect())
+        } else {
+            Ok(vec![])
+        }
+    }
 }
 
-// Global client instance
+// Global client instances
 static HN_CLIENT: std::sync::OnceLock<HNClient> = std::sync::OnceLock::new();
 
 fn get_hn_client() -> &'static HNClient {
@@ -71,7 +114,7 @@ fn get_hn_client() -> &'static HNClient {
 }
 
 // API Handlers
-async fn get_top_stories() -> Result<Json<Vec<HNStory>>, (StatusCode, Json<ApiError>)> {
+async fn get_top_stories() -> Result<AxumJson<Vec<HNStory>>, (StatusCode, AxumJson<ApiError>)> {
     let client = get_hn_client();
     
     match client.get_top_stories().await {
@@ -88,13 +131,13 @@ async fn get_top_stories() -> Result<Json<Vec<HNStory>>, (StatusCode, Json<ApiEr
                         .collect();
                     
                     info!("Successfully fetched {} top stories", valid_stories.len());
-                    Ok(Json(valid_stories))
+                    Ok(AxumJson(valid_stories))
                 }
                 Err(e) => {
                     error!("Failed to fetch story details: {}", e);
                     Err((
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ApiError {
+                        AxumJson(ApiError {
                             error: "Failed to fetch story details".to_string(),
                         }),
                     ))
@@ -105,7 +148,7 @@ async fn get_top_stories() -> Result<Json<Vec<HNStory>>, (StatusCode, Json<ApiEr
             error!("Failed to fetch top stories: {}", e);
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiError {
+                AxumJson(ApiError {
                     error: "Failed to fetch top stories".to_string(),
                 }),
             ))
@@ -113,19 +156,19 @@ async fn get_top_stories() -> Result<Json<Vec<HNStory>>, (StatusCode, Json<ApiEr
     }
 }
 
-async fn get_story_by_id(Path(id): Path<u32>) -> Result<Json<HNStory>, (StatusCode, Json<ApiError>)> {
+async fn get_story_by_id(Path(id): Path<u32>) -> Result<AxumJson<HNStory>, (StatusCode, AxumJson<ApiError>)> {
     let client = get_hn_client();
     
     match client.get_story(id).await {
         Ok(story) => {
             info!("Successfully fetched story {}", id);
-            Ok(Json(story))
+            Ok(AxumJson(story))
         }
         Err(e) => {
             error!("Failed to fetch story {}: {}", id, e);
             Err((
                 StatusCode::NOT_FOUND,
-                Json(ApiError {
+                AxumJson(ApiError {
                     error: format!("Story {} not found", id),
                 }),
             ))
@@ -133,11 +176,132 @@ async fn get_story_by_id(Path(id): Path<u32>) -> Result<Json<HNStory>, (StatusCo
     }
 }
 
-async fn health_check() -> Json<HashMap<String, String>> {
+async fn get_story_comments(Path(id): Path<u32>) -> Result<AxumJson<Vec<HNComment>>, (StatusCode, AxumJson<ApiError>)> {
+    let client = get_hn_client();
+    
+    match client.get_story(id).await {
+        Ok(story) => {
+            match client.get_comments_for_story(&story).await {
+                Ok(comments) => {
+                    info!("Successfully fetched {} comments for story {}", comments.len(), id);
+                    Ok(AxumJson(comments))
+                }
+                Err(e) => {
+                    error!("Failed to fetch comments for story {}: {}", id, e);
+                    Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        AxumJson(ApiError {
+                            error: format!("Failed to fetch comments for story {}", id),
+                        }),
+                    ))
+                }
+            }
+        }
+        Err(e) => {
+            error!("Failed to fetch story {}: {}", id, e);
+            Err((
+                StatusCode::NOT_FOUND,
+                AxumJson(ApiError {
+                    error: format!("Story {} not found", id),
+                }),
+            ))
+        }
+    }
+}
+
+async fn generate_content(
+    Json(payload): Json<ContentGenerationRequest>
+) -> Result<AxumJson<ContentGenerationResponse>, (StatusCode, AxumJson<ApiError>)> {
+    let story_id = payload.story_id;
+    let comments: Vec<String> = payload.comments
+        .into_iter()
+        .filter_map(|comment| Some(comment))
+        .filter(|c: &String| !c.is_empty())
+        .collect();
+
+    if comments.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST, 
+            AxumJson(ApiError { error: "No comments provided".to_string() })
+        ));
+    }
+
+    // Combine all comments into a single text
+    let combined_comments = comments.join("\n\n---\n\n");
+    let source = format!("HackerNews Story #{} Comments", story_id);
+
+    // Send to Alchemyst AI context add endpoint
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/api/v1/context/add", env::var("ALCHEMYST_API_URL").unwrap_or_else(|_| "https://platform-backend.getalchemystai.com".to_string())))
+        .header("Authorization", format!("Bearer {}", env::var("ALCHEMYST_API_KEY").unwrap_or_default()))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "documents": [{
+                "content": combined_comments
+            }],
+            "context_type": "resource",
+            "source": source,
+            "metadata": {
+                "fileName": format!("story_{}_comments_{}.txt", story_id, chrono::Utc::now().timestamp()),
+                "fileSize": combined_comments.len(),
+                "fileType": "text/plain",
+                "lastModified": chrono::Utc::now().to_rfc3339()
+            }
+        }))
+        .send()
+        .await
+        .map_err(|e| {
+            error!("Context add request failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR, 
+                AxumJson(ApiError { error: "Failed to send context add request".to_string() })
+            )
+        })?;
+
+    // Check response - 500 is acceptable as per user request
+    let status = response.status();
+    let response_text = response.text().await.map_err(|e| {
+        error!("Failed to read response: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR, 
+            AxumJson(ApiError { error: "Failed to read response".to_string() })
+        )
+    })?;
+
+    if status.is_success() || status.as_u16() == 500 {
+        // Both 200 and 500 are acceptable
+        let message = if status.is_success() {
+            format!("Successfully added context for story {}. Response: {}", story_id, response_text)
+        } else {
+            format!("Context add completed for story {} (status: {}). Response: {}", story_id, status, response_text)
+        };
+
+        Ok(AxumJson(ContentGenerationResponse {
+            message,
+            context_added: true,
+            story_id
+        }))
+    } else {
+        Err((
+            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), 
+            AxumJson(ApiError { 
+                error: format!("Context add failed with status: {}. Response: {}", status, response_text) 
+            })
+        ))
+    }
+}
+
+async fn health_check() -> AxumJson<HashMap<String, String>> {
     let mut response = HashMap::new();
     response.insert("status".to_string(), "healthy".to_string());
     response.insert("service".to_string(), "hackernews-backend".to_string());
-    Json(response)
+    
+    // Check if Alchemyst AI is configured
+    let alchemyst_configured = env::var("ALCHEMYST_API_URL").is_ok() && env::var("ALCHEMYST_API_KEY").is_ok();
+    response.insert("alchemyst_ai_configured".to_string(), alchemyst_configured.to_string());
+    
+    AxumJson(response)
 }
 
 // Website metadata endpoint
@@ -150,7 +314,7 @@ struct WebsiteMetadata {
     favicon: Option<String>,
 }
 
-async fn get_website_metadata(Query(params): Query<HashMap<String, String>>) -> Result<Json<WebsiteMetadata>, StatusCode> {
+async fn get_website_metadata(Query(params): Query<HashMap<String, String>>) -> Result<AxumJson<WebsiteMetadata>, StatusCode> {
     let url = match params.get("url") {
         Some(url) => url,
         None => return Err(StatusCode::BAD_REQUEST),
@@ -184,7 +348,7 @@ async fn get_website_metadata(Query(params): Query<HashMap<String, String>>) -> 
 
     if !response.status().is_success() {
         // Return basic metadata if we can't fetch the page
-        return Ok(Json(WebsiteMetadata {
+        return Ok(AxumJson(WebsiteMetadata {
             url: url.clone(),
             title: None,
             description: None,
@@ -206,7 +370,7 @@ async fn get_website_metadata(Query(params): Query<HashMap<String, String>>) -> 
     // Try to get favicon
     let favicon = extract_favicon(&html, &domain);
 
-    Ok(Json(WebsiteMetadata {
+    Ok(AxumJson(WebsiteMetadata {
         url: url.clone(),
         title,
         description,
@@ -261,6 +425,9 @@ fn extract_favicon(html: &str, domain: &str) -> Option<String> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load environment variables from .env file
+    dotenv::dotenv().ok();
+    
     // Initialize tracing
     tracing_subscriber::fmt::init();
 
@@ -269,6 +436,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health_check))
         .route("/api/stories", get(get_top_stories))
         .route("/api/stories/:id", get(get_story_by_id))
+        .route("/api/stories/:id/comments", get(get_story_comments))
+        .route("/api/generate-content", post(generate_content))
         .route("/api/metadata", get(get_website_metadata))
         .layer(
             CorsLayer::new()

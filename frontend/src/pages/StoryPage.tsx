@@ -7,7 +7,7 @@ import { Slider } from '@/components/ui/slider';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ThemeToggle } from '@/components/theme-toggle';
-import { ArrowLeft, Mic, Settings, Play, ExternalLink, Globe, LinkIcon, Calendar, AlertCircle } from 'lucide-react';
+import { ArrowLeft, Mic, Settings, Play, ExternalLink, Globe, LinkIcon, Calendar, AlertCircle, Brain, Loader2, MessageSquare } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 
 interface HNStory {
@@ -20,6 +20,15 @@ interface HNStory {
   time: number;
   descendants?: number;
   kids?: number[];
+}
+
+interface HNComment {
+  id: number;
+  by?: string;
+  time?: number;
+  text?: string;
+  kids?: number[];
+  parent?: number;
 }
 
 interface WebsiteMetadata {
@@ -37,6 +46,9 @@ const StoryPage = () => {
   const [loading, setLoading] = useState(true);
   const [metadata, setMetadata] = useState<WebsiteMetadata | null>(null);
   const [metadataLoading, setMetadataLoading] = useState(false);
+  const [comments, setComments] = useState<HNComment[]>([]);
+  const [commentsLoading, setCommentsLoading] = useState(false);
+  const [contentGenerating, setContentGenerating] = useState(false);
   
   // Podcast settings
   const [voice, setVoice] = useState('female');
@@ -74,8 +86,140 @@ const StoryPage = () => {
       }
     };
 
+    const fetchComments = async () => {
+      if (!id) return;
+      
+      setCommentsLoading(true);
+      try {
+        const response = await fetch(`http://localhost:3001/api/stories/${id}/comments`);
+        const commentsData = await response.json();
+        setComments(commentsData);
+        
+        toast({
+          title: "Comments Loaded",
+          description: `Fetched ${commentsData.length} comments.`,
+        });
+      } catch (error) {
+        console.error('Error fetching comments:', error);
+        toast({
+          title: "Error",
+          description: "Failed to fetch comments. Please try again.",
+          variant: "destructive",
+        });
+      } finally {
+        setCommentsLoading(false);
+      }
+    };
+
     fetchStory();
+    fetchComments(); // Automatically fetch comments when page loads
   }, [id]);
+
+  const fetchComments = async () => {
+    if (!id) return;
+    
+    setCommentsLoading(true);
+    try {
+      const response = await fetch(`http://localhost:3001/api/stories/${id}/comments`);
+      const commentsData = await response.json();
+      setComments(commentsData);
+      
+      toast({
+        title: "Comments Loaded",
+        description: `Fetched ${commentsData.length} comments for content generation.`,
+      });
+    } catch (error) {
+      console.error('Error fetching comments:', error);
+      toast({
+        title: "Error",
+        description: "Failed to fetch comments. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setCommentsLoading(false);
+    }
+  };
+
+  const generateContent = async () => {
+    if (!id) return;
+
+    setContentGenerating(true);
+    try {
+      let commentsToUse = comments;
+      
+      // If no comments are loaded, fetch them first
+      if (comments.length === 0) {
+        setCommentsLoading(true);
+        try {
+          const response = await fetch(`http://localhost:3001/api/stories/${id}/comments`);
+          const commentsData = await response.json();
+          setComments(commentsData);
+          commentsToUse = commentsData;
+          
+          toast({
+            title: "Comments Loaded",
+            description: `Fetched ${commentsData.length} comments.`,
+          });
+        } catch (error) {
+          console.error('Error fetching comments:', error);
+          toast({
+            title: "Error",
+            description: "Failed to fetch comments. Please try again.",
+            variant: "destructive",
+          });
+          return;
+        } finally {
+          setCommentsLoading(false);
+        }
+      }
+
+      // Filter and extract comment text - use ALL comments
+      const commentTexts = commentsToUse
+        .filter(comment => comment.text)
+        .map(comment => comment.text!);
+
+      if (commentTexts.length === 0) {
+        toast({
+          title: "No Comments Found",
+          description: "This story doesn't have any text comments to process.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // Send comments to Alchemyst AI
+      const response = await fetch('http://localhost:3001/api/generate-content', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          story_id: parseInt(id),
+          comments: commentTexts,
+        }),
+      });
+
+      const result = await response.json();
+
+      if (response.ok) {
+        toast({
+          title: "Content Added to AI Context!",
+          description: `${result.message} - Ready for AI queries.`,
+        });
+      } else {
+        throw new Error(result.error || 'Failed to generate content');
+      }
+    } catch (error) {
+      console.error('Error generating content:', error);
+      toast({
+        title: "Generation Failed",
+        description: error instanceof Error ? error.message : "Failed to generate content. Please check your AI API configuration.",
+        variant: "destructive",
+      });
+    } finally {
+      setContentGenerating(false);
+    }
+  };
 
   const handleGeneratePodcast = () => {
     const lengthLabels = ['Short', 'Medium', 'Long'];
@@ -177,10 +321,7 @@ const StoryPage = () => {
               {story.title}
             </h1>
             <div className="flex items-center gap-4 mt-3 text-sm text-muted-foreground">
-              <span>{story.score} points</span>
-              {story.descendants !== undefined && (
-                <span>{story.descendants} comments</span>
-              )}
+              <span><b>HackerNews Points : {story.score} points</b></span>
             </div>
           </div>
         </div>
@@ -250,16 +391,92 @@ const StoryPage = () => {
                 </Select>
               </div>
 
-              {/* Generate Button */}
-              <Button 
-                onClick={handleGeneratePodcast}
-                className="w-full bg-podcast-orange hover:bg-podcast-orange/90 text-podcast-orange-foreground"
-                size="lg"
-              >
-                <Play className="w-4 h-4 mr-2" />
-                Generate Podcast
-              </Button>
+              {/* Generate Buttons */}
+              <div className="items-center justify-center flex gap-3">
+
+                <Button 
+                  onClick={generateContent}
+                  className="w-full bg-podcast-orange hover:bg-podcast-orange/90 text-podcast-orange-foreground"
+                  size="lg"
+                  variant="default"
+                >
+                  {contentGenerating ? (
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  ) : commentsLoading ? (
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  ) : (
+                    <Brain className="w-4 h-4 mr-2" />
+                  )}
+                  {contentGenerating 
+                    ? 'Generating Content...' 
+                    : commentsLoading 
+                    ? 'Loading Comments...'
+                    : comments.length > 0 
+                    ? `Generate AI Context (${comments.length} comments)`
+                    : 'Load & Generate AI Context'
+                  }
+                </Button>
+
+                
+                <Button 
+                  onClick={handleGeneratePodcast}
+                  className="w-full bg-podcast-orange hover:bg-podcast-orange/90 text-podcast-orange-foreground"
+                  size="lg"
+                  variant='outline'
+                >
+                  <Play className="w-4 h-4 mr-2" />
+                  Generate Podcast
+                </Button>
+                
+              </div>
             </div>
+          </Card>
+
+          {/* Comments Section */}
+          <Card className="p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <MessageSquare className="w-5 h-5 text-tech-blue" />
+              <h2 className="text-xl font-semibold text-foreground">
+                Comments ({comments.length})
+              </h2>
+            </div>
+
+            {commentsLoading ? (
+              <div className="space-y-3">
+                {Array.from({ length: 5 }).map((_, i) => (
+                  <div key={i} className="space-y-2">
+                    <Skeleton className="h-4 w-1/4" />
+                    <Skeleton className="h-3 w-full" />
+                    <Skeleton className="h-3 w-3/4" />
+                  </div>
+                ))}
+              </div>
+            ) : comments.length > 0 ? (
+              <div className="space-y-4 max-h-96 overflow-y-auto">
+                {comments.map((comment) => (
+                  <div key={comment.id} className="border border-border rounded-lg p-4 bg-card">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-sm font-medium text-foreground">
+                        {comment.by || 'Anonymous'}
+                      </span>
+                      {comment.time && (
+                        <span className="text-xs text-muted-foreground">
+                          {formatTimeAgo(comment.time)}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-sm text-foreground leading-relaxed">
+                      {comment.text || 'No text content'}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-center py-8 text-muted-foreground">
+                <MessageSquare className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                <p>No comments available for this story.</p>
+              </div>
+            )}
           </Card>
 
           {/* Right Column - Website Viewer */}
