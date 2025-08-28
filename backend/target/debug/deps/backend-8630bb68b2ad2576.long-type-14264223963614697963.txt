@@ -1,0 +1,2 @@
+fn(axum::extract::Path<u32>) -> impl futures::Future<Output = Result<{type error}, (axum::http::StatusCode, {type error})>> {get_story_by_id}
+fn(axum::extract::Path<u32>) -> impl futures::Future<Output = Result<{type error}, (axum::http::StatusCode, {type error})>> {get_story_by_id}: Handler<_, _>

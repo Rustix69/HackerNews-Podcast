@@ -1,0 +1,2 @@
+fn() -> impl futures::Future<Output = Result<{type error}, (axum::http::StatusCode, {type error})>> {get_top_stories}
+fn() -> impl futures::Future<Output = Result<{type error}, (axum::http::StatusCode, {type error})>> {get_top_stories}: Handler<_, _>
