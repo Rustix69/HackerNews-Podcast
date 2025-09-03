@@ -1,7 +1,7 @@
 use axum::{
     extract::{Json, Query, Path},
     http::StatusCode,
-    response::Json as AxumJson,
+    response::{Json as AxumJson, Sse},
     routing::{get, post},
     Router,
 };
@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use tower_http::cors::CorsLayer;
 use tracing::{info, error};
 use std::env;
+use axum::response::sse::{Event, KeepAlive};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct HNStory {
@@ -423,6 +424,341 @@ fn extract_favicon(html: &str, domain: &str) -> Option<String> {
     Some(format!("https://{}/favicon.ico", domain))
 }
 
+// --- New: Podcast generation endpoint ---
+#[derive(Debug, Deserialize)]
+struct PodcastGenerationRequest {
+    persona: Option<String>,
+    scope: Option<String>,
+    title: Option<String>,
+}
+
+async fn generate_podcast(
+    Json(payload): Json<PodcastGenerationRequest>
+) -> Result<(StatusCode, AxumJson<serde_json::Value>), (StatusCode, AxumJson<ApiError>)> {
+    let api_url = env::var("ALCHEMYST_API_URL").unwrap_or_else(|_| "https://platform-backend.getalchemystai.com".to_string());
+    let api_key = env::var("ALCHEMYST_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            AxumJson(ApiError { error: "ALCHEMYST_API_KEY is not configured".to_string() })
+        ));
+    }
+
+    let persona = payload.persona.unwrap_or_else(|| "maya".to_string());
+    let scope = payload.scope.unwrap_or_else(|| "internal".to_string());
+    let title = payload.title.unwrap_or_else(|| "HackerNews Podcast".to_string());
+
+    // Read podcast prompt as system message
+    let system_prompt: &str = include_str!("prompt.md");
+
+    let chat_history = vec![
+        serde_json::json!({ "role": "system", "content": system_prompt }),
+        serde_json::json!({ "role": "user", "content": format!(
+            "Generate a podcast episode titled \"{}\" using the most relevant available context from my workspace (HackerNews stories, comments, and any added documents). Automatically retrieve context as needed and produce the full script per the instructions.",
+            title
+        ) }),
+    ];
+
+    let body = serde_json::json!({
+        "chat_history": chat_history,
+        "persona": persona,
+        "scope": scope,
+        "stream": false,
+        "tools": {
+            "researchIcps": false
+        }
+    });
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v1/chat/generate", api_url);
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            error!("Podcast generation request failed: {}", e);
+            (
+                StatusCode::BAD_GATEWAY,
+                AxumJson(ApiError { error: "Upstream request failed".to_string() })
+            )
+        })?;
+
+    let status = resp.status();
+    let response_text = resp.text().await.map_err(|e| {
+        error!("Failed to read upstream response text: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            AxumJson(ApiError { error: "Failed to read upstream response".to_string() })
+        )
+    })?;
+
+    info!("Alchemyst response status: {}", status);
+    info!("Alchemyst response body: {}", response_text);
+
+    // Try to parse as JSON
+    let value: serde_json::Value = match serde_json::from_str(&response_text) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Failed to parse upstream response as JSON: {}. Raw response: {}", e, response_text);
+            // Return the raw response as a string in a JSON wrapper
+            return Ok((StatusCode::OK, AxumJson(serde_json::json!({
+                "raw_response": response_text,
+                "status": status.as_u16(),
+                "parse_error": e.to_string()
+            }))));
+        }
+    };
+
+    if status.is_success() || status.as_u16() == 201 {
+        // Platform API returns: { result: { response: { content: "..." } }, chatId, title, researchMode, stream }
+        if let Some(result) = value.get("result") {
+            if let Some(response_content) = result.get("response") {
+                if let Some(content) = response_content.get("content") {
+                    return Ok((StatusCode::OK, AxumJson(serde_json::json!({
+                        "podcast_script": content,
+                        "title": value.get("title").unwrap_or(&serde_json::Value::String(title.clone())),
+                        "chat_id": value.get("chatId"),
+                        "research_mode": value.get("researchMode"),
+                        "status": "success"
+                    }))));
+                }
+            }
+            // Handle case where result.response is the content directly
+            else if let Some(content) = result.get("content") {
+                return Ok((StatusCode::OK, AxumJson(serde_json::json!({
+                    "podcast_script": content,
+                    "title": value.get("title").unwrap_or(&serde_json::Value::String(title.clone())),
+                    "chat_id": value.get("chatId"),
+                    "research_mode": value.get("researchMode"),
+                    "status": "success"
+                }))));
+            }
+        }
+        // Fallback: return the full response for debugging
+        Ok((StatusCode::OK, AxumJson(serde_json::json!({
+            "raw_platform_response": value,
+            "status": "success_but_unexpected_format"
+        }))))
+    } else {
+        error!("Upstream returned error status: {} body: {}", status, value);
+        Err((
+            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            AxumJson(ApiError { error: format!("Podcast generation failed: {}", response_text) })
+        ))
+    }
+}
+
+// New structs for the generate endpoint
+#[derive(Debug, Deserialize)]
+struct LangChainMessage {
+    content: String,
+    role: String,
+}
+
+
+#[derive(Debug, Deserialize)]
+struct GenerateRequest {
+    chat_history: Vec<LangChainMessage>,
+    persona: Option<String>,
+    scope: Option<String>,
+
+}
+
+#[derive(Debug, Serialize)]
+struct StreamingResponse {
+    r#type: String,
+    content: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    icon: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<serde_json::Value>,
+}
+
+// Generate streaming endpoint
+async fn generate_stream(
+    Json(payload): Json<GenerateRequest>
+) -> Result<Sse<impl futures::Stream<Item = Result<Event, std::convert::Infallible>>>, (StatusCode, AxumJson<ApiError>)> {
+    let api_url = env::var("ALCHEMYST_API_URL").unwrap_or_else(|_| "https://platform-backend.getalchemystai.com".to_string());
+    let api_key = env::var("ALCHEMYST_API_KEY").unwrap_or_default();
+    
+    if api_key.is_empty() {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            AxumJson(ApiError { error: "ALCHEMYST_API_KEY is not configured".to_string() })
+        ));
+    }
+
+    let persona = payload.persona.unwrap_or_else(|| "maya".to_string());
+    let scope = payload.scope.unwrap_or_else(|| "internal".to_string());
+
+    // Read podcast prompt as system message
+    let system_prompt: &str = include_str!("prompt.md");
+
+    // Convert user messages and add system prompt for podcast generation
+    let mut chat_history: Vec<serde_json::Value> = vec![
+        serde_json::json!({ "role": "system", "content": system_prompt })
+    ];
+    
+    // Add user messages but modify them to focus on podcast generation
+    for msg in payload.chat_history {
+        if msg.role == "user" {
+            let podcast_content = format!(
+                "Generate a podcast episode using the available context from my workspace. User request: {}. Automatically retrieve relevant context and produce the full podcast script per the instructions.",
+                msg.content
+            );
+            chat_history.push(serde_json::json!({
+                "content": podcast_content,
+                "role": "user"
+            }));
+        } else {
+            chat_history.push(serde_json::json!({
+                "content": msg.content,
+                "role": msg.role
+            }));
+        }
+    }
+
+    let body = serde_json::json!({
+        "chat_history": chat_history,
+        "persona": persona,
+        "scope": scope,
+        "stream": true,
+        "tools": {
+            "researchIcps": false,
+            "deepResearch": false,
+            "webSearch": false,
+            "organizationSearch": true
+        }
+    });
+
+    info!("Sending request to Alchemyst API: {}", serde_json::to_string_pretty(&body).unwrap_or_default());
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v1/chat/generate/stream", api_url);
+    
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            error!("Generate stream request failed: {}", e);
+            (
+                StatusCode::BAD_GATEWAY,
+                AxumJson(ApiError { error: "Upstream request failed".to_string() })
+            )
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let error_text = response.text().await.unwrap_or_default();
+        error!("Upstream API returned error: {} - {}", status, error_text);
+        return Err((
+            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            AxumJson(ApiError { error: format!("Upstream API error: {}", error_text) })
+        ));
+    }
+
+    // Get the response text and process it
+    let response_text = response.text().await.map_err(|e| {
+        error!("Failed to read response text: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            AxumJson(ApiError { error: "Failed to read response".to_string() })
+        )
+    })?;
+
+    info!("Received response from Alchemyst API: {}", response_text);
+
+    // Create a stream from the response text
+    let stream = async_stream::stream! {
+        let lines: Vec<&str> = response_text.lines().collect();
+        
+        for line in lines {
+            let line = line.trim();
+            
+            if line.is_empty() || line == "data: [DONE]" {
+                continue;
+            }
+            
+            if line.starts_with("data: ") {
+                let data = &line[6..];
+                if data.trim() == "[DONE]" {
+                    break;
+                }
+                
+                // Try to parse and process the data
+                match serde_json::from_str::<serde_json::Value>(data) {
+                    Ok(json_data) => {
+                        // Extract and display only the content from specific message types
+                        if let Some(message_type) = json_data.get("type").and_then(|t| t.as_str()) {
+                            match message_type {
+                                "thinking_update" => {
+                                    if let Some(content) = json_data.get("content") {
+                                        let content_str = if content.is_string() {
+                                            content.as_str().unwrap_or("").to_string()
+                                        } else {
+                                            serde_json::to_string(content).unwrap_or_default()
+                                        };
+                                        info!("🤔 Thinking: {}", content_str);
+                                        yield Ok(Event::default().data(serde_json::to_string(&json_data).unwrap_or_default()));
+                                    }
+                                }
+                                "final_response" => {
+                                    if let Some(content) = json_data.get("content") {
+                                        let content_str = if content.is_string() {
+                                            content.as_str().unwrap_or("").to_string()
+                                        } else {
+                                            serde_json::to_string(content).unwrap_or_default()
+                                        };
+                                        info!("💬 Response: {}", content_str);
+                                        yield Ok(Event::default().data(serde_json::to_string(&json_data).unwrap_or_default()));
+                                    }
+                                }
+                                "metadata" => {
+                                    if let Some(content) = json_data.get("content") {
+                                        info!("📊 Metadata: {}", serde_json::to_string(content).unwrap_or_default());
+                                        yield Ok(Event::default().data(serde_json::to_string(&json_data).unwrap_or_default()));
+                                    }
+                                }
+                                _ => {
+                                    // Forward other types as-is but log them
+                                    info!("📤 Other message type '{}': {}", message_type, serde_json::to_string(&json_data).unwrap_or_default());
+                                    yield Ok(Event::default().data(serde_json::to_string(&json_data).unwrap_or_default()));
+                                }
+                            }
+                        } else {
+                            // Forward messages without type as-is
+                            yield Ok(Event::default().data(serde_json::to_string(&json_data).unwrap_or_default()));
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to parse JSON from stream: {} - Data: {}", e, data);
+                        // Send error as thinking update
+                        let error_response = StreamingResponse {
+                            r#type: "thinking_update".to_string(),
+                            content: serde_json::json!(format!("Error parsing stream data: {}", e)),
+                            icon: None,
+                            error: None,
+                        };
+                        yield Ok(Event::default().data(serde_json::to_string(&error_response).unwrap_or_default()));
+                    }
+                }
+            }
+        }
+        
+        // Send completion signal
+        yield Ok(Event::default().data("[DONE]"));
+    };
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load environment variables from .env file
@@ -439,6 +775,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/stories/:id/comments", get(get_story_comments))
         .route("/api/generate-content", post(generate_content))
         .route("/api/metadata", get(get_website_metadata))
+        .route("/api/podcast/generate", post(generate_podcast))
+        .route("/api/v1/chat/generate/stream", post(generate_stream))
         .layer(
             CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)

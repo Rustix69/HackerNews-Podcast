@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -49,6 +49,15 @@ const StoryPage = () => {
   const [comments, setComments] = useState<HNComment[]>([]);
   const [commentsLoading, setCommentsLoading] = useState(false);
   const [contentGenerating, setContentGenerating] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
+  
+  // Add ref for scrolling
+  const loaderRef = useRef<HTMLDivElement>(null);
+  
+  // Podcast generation state
+  const [podcastGenerating, setPodcastGenerating] = useState(false);
+  const [podcastThinking, setPodcastThinking] = useState<string[]>([]);
+  const [podcastResult, setPodcastResult] = useState<string | null>(null);
   
   // Podcast settings
   const [voice, setVoice] = useState('female');
@@ -221,14 +230,109 @@ const StoryPage = () => {
     }
   };
 
-  const handleGeneratePodcast = () => {
-    const lengthLabels = ['Short', 'Medium', 'Long'];
-    const currentLength = lengthLabels[length[0] - 1];
-    
-    toast({
-      title: "Podcast Generation Started!",
-      description: `Generating ${currentLength.toLowerCase()} ${mode} podcast with ${voice} voice...`,
-    });
+  const handleGeneratePodcast = async () => {
+    if (!story) return;
+
+    setIsGenerating(true);
+    setPodcastGenerating(true);
+    setPodcastResult(null);
+    setPodcastThinking([]);
+
+    // Scroll to loader
+    setTimeout(() => {
+      loaderRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, 100);
+
+    try {
+      const response = await fetch('http://localhost:3001/api/v1/chat/generate/stream', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          chat_history: [
+            {
+              content: `Create a podcast episode about "${story.title}". Length: ${['Short (2-3 min)', 'Medium (5-7 min)', 'Long (10-15 min)'][length[0] - 1]}, Style: ${mode}, Voice: ${voice}`,
+              role: 'user'
+            }
+          ],
+          persona: 'maya',
+          scope: 'internal'
+        }),
+      });
+
+      if (!response.body) {
+        throw new Error('No response body');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value);
+          console.log('Raw chunk:', chunk);
+          
+          // Split by newlines first to handle multiple SSE events
+          const lines = chunk.split('\n');
+          
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            
+            const data = line.slice(6).trim(); // Remove 'data: ' prefix
+            if (data === '[DONE]' || data === 'null') continue;
+
+            try {
+              const jsonChunk = JSON.parse(data);
+              
+              // Only handle final response
+              if (jsonChunk.type === 'final_response' && jsonChunk.content) {
+                let responseContent = typeof jsonChunk.content === 'string' 
+                  ? jsonChunk.content 
+                  : JSON.stringify(jsonChunk.content);
+                
+                // Remove surrounding quotes if present
+                if (responseContent.startsWith('"') && responseContent.endsWith('"')) {
+                  responseContent = responseContent.slice(1, -1);
+                }
+                
+                // Unescape newlines and other escaped characters
+                responseContent = responseContent.replace(/\\n/g, '\n')
+                  .replace(/\\"/g, '"')
+                  .replace(/\\\\/g, '\\');
+                
+                setPodcastResult(responseContent);
+                
+                toast({
+                  title: "Podcast Generated Successfully!",
+                  description: "Your podcast episode is ready.",
+                });
+              }
+            } catch (parseError) {
+              console.error('Error parsing JSON chunk:', parseError);
+              continue;
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    } catch (error) {
+      console.error('Error generating podcast:', error);
+      toast({
+        title: "Podcast Generation Failed",
+        description: error instanceof Error ? error.message : "Failed to generate podcast. Please try again.",
+        variant: "destructive",
+      });
+      setPodcastGenerating(false);
+      setPodcastResult(null);
+      setPodcastThinking([]);
+    } finally {
+      setIsGenerating(false);
+    }
   };
 
   const formatTimeAgo = (timestamp: number) => {
@@ -420,12 +524,22 @@ const StoryPage = () => {
                 
                 <Button 
                   onClick={handleGeneratePodcast}
+                  disabled={isGenerating}
                   className="w-full bg-podcast-orange hover:bg-podcast-orange/90 text-podcast-orange-foreground"
                   size="lg"
                   variant='outline'
                 >
-                  <Play className="w-4 h-4 mr-2" />
-                  Generate Podcast
+                  {isGenerating ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Generating...
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-4 h-4 mr-2" />
+                      Generate Podcast
+                    </>
+                  )}
                 </Button>
                 
               </div>
@@ -560,20 +674,6 @@ const StoryPage = () => {
                     </div>
                   </div>
                 </div>
-
-                {/* Additional Info */}
-                {/* <div className="bg-muted/50 rounded-lg p-4">
-                  <div className="flex items-center gap-2 text-sm text-muted-foreground mb-2">
-                    <Calendar className="w-4 h-4" />
-                    <span>Posted {formatTimeAgo(story.time)} by {story.by}</span>
-                  </div>
-                  <div className="flex items-center gap-4 text-sm text-muted-foreground">
-                    <span>{story.score} points</span>
-                    {story.descendants !== undefined && (
-                      <span>{story.descendants} comments</span>
-                    )}
-                  </div>
-                </div> */}
               </div>
             ) : (
               <div className="flex items-center justify-center h-96 text-muted-foreground">
@@ -585,6 +685,47 @@ const StoryPage = () => {
               </div>
             )}
           </Card>
+        </div>
+
+        {/* Podcast Content Section */}
+        <div className="w-[75vw] mx-auto mt-8">
+          {podcastGenerating && !podcastResult && (
+            <Card className="p-6" ref={loaderRef}>
+              <div className="text-center">
+                <div className="flex items-center justify-center mb-4">
+                  <Loader2 className="w-12 h-12 animate-spin text-podcast-orange" />
+                </div>
+                <h2 className="text-2xl font-bold text-foreground mb-2">Generating Podcast</h2>
+                <p className="text-muted-foreground">Creating your personalized podcast episode...</p>
+              </div>
+            </Card>
+          )}
+
+          {podcastResult && (
+            <Card className="p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <Play className="w-6 h-6 text-podcast-orange" />
+                <h2 className="text-2xl font-bold text-foreground">Generated Podcast Script</h2>
+              </div>
+              <div className="bg-muted/30 rounded-lg p-4 max-h-[600px] overflow-y-auto">
+                <pre className="text-sm text-foreground whitespace-pre-wrap font-mono">
+                  {podcastResult}
+                </pre>
+              </div>
+              <div className="flex justify-end mt-4">
+                <Button 
+                  onClick={() => {
+                    setPodcastResult(null);
+                    setPodcastGenerating(false);
+                    setPodcastThinking([]);
+                  }}
+                  variant="outline"
+                >
+                  Clear
+                </Button>
+              </div>
+            </Card>
+          )}
         </div>
       </div>
     </div>
