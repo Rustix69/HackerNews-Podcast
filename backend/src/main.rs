@@ -629,7 +629,7 @@ async fn generate_stream(
         "tools": {
             "researchIcps": false,
             "deepResearch": false,
-            "webSearch": false,
+            "webSearch": true,
             "organizationSearch": true
         }
     });
