@@ -9,6 +9,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { ArrowLeft, Mic, Settings, Play, ExternalLink, Globe, LinkIcon, Calendar, AlertCircle, Brain, Loader2, MessageSquare } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
+import { downloadWavFromTextGemini } from '@/lib/tts';
 
 interface HNStory {
   id: number;
@@ -58,6 +59,7 @@ const StoryPage = () => {
   const [podcastGenerating, setPodcastGenerating] = useState(false);
   const [podcastThinking, setPodcastThinking] = useState<string[]>([]);
   const [podcastResult, setPodcastResult] = useState<string | null>(null);
+  const [downloadingAudio, setDownloadingAudio] = useState(false);
   
   // Podcast settings
   const [voice, setVoice] = useState('female');
@@ -712,7 +714,39 @@ const StoryPage = () => {
                   {podcastResult}
                 </pre>
               </div>
-              <div className="flex justify-end mt-4">
+              <div className="flex justify-end mt-4 gap-2">
+                <Button 
+                  onClick={async () => {
+                    if (!podcastResult) return;
+                    try {
+                      setDownloadingAudio(true);
+                      await downloadWavFromTextGemini(podcastResult);
+                      toast({
+                        title: 'Download started',
+                        description: 'Saved as out.wav',
+                      });
+                    } catch (e) {
+                      console.error(e);
+                      toast({
+                        title: 'TTS failed',
+                        description: e instanceof Error ? e.message : 'Unable to synthesize audio',
+                        variant: 'destructive',
+                      });
+                    } finally {
+                      setDownloadingAudio(false);
+                    }
+                  }}
+                  disabled={downloadingAudio}
+                >
+                  {downloadingAudio ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Downloading...
+                    </>
+                  ) : (
+                    'Download out.wav'
+                  )}
+                </Button>
                 <Button 
                   onClick={() => {
                     setPodcastResult(null);

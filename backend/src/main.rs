@@ -1,7 +1,7 @@
 use axum::{
     extract::{Json, Query, Path},
     http::StatusCode,
-    response::{Json as AxumJson, Sse},
+    response::{Json as AxumJson, Sse, Response},
     routing::{get, post},
     Router,
 };
@@ -11,6 +11,8 @@ use tower_http::cors::CorsLayer;
 use tracing::{info, error};
 use std::env;
 use axum::response::sse::{Event, KeepAlive};
+use axum::body::Body;
+use axum::http::HeaderMap;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct HNStory {
@@ -564,7 +566,11 @@ struct GenerateRequest {
     chat_history: Vec<LangChainMessage>,
     persona: Option<String>,
     scope: Option<String>,
+}
 
+#[derive(Debug, Deserialize)]
+struct TTSRequest {
+    text: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -629,7 +635,7 @@ async fn generate_stream(
         "tools": {
             "researchIcps": false,
             "deepResearch": false,
-            "webSearch": true,
+            "webSearch": false,
             "organizationSearch": true
         }
     });
@@ -759,6 +765,156 @@ async fn generate_stream(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
+fn create_wav_from_pcm(
+    pcm_data: &[u8], 
+    sample_rate: u32, 
+    channels: u16, 
+    bits_per_sample: u16
+) -> Result<Vec<u8>, (StatusCode, AxumJson<ApiError>)> {
+    let data_size = pcm_data.len() as u32;
+    let file_size = 36 + data_size;
+    let byte_rate = sample_rate * channels as u32 * (bits_per_sample as u32 / 8);
+    let block_align = channels * (bits_per_sample / 8);
+
+    let mut wav_data = Vec::new();
+    
+    // RIFF header
+    wav_data.extend_from_slice(b"RIFF");
+    wav_data.extend_from_slice(&file_size.to_le_bytes());
+    wav_data.extend_from_slice(b"WAVE");
+    
+    // fmt chunk
+    wav_data.extend_from_slice(b"fmt ");
+    wav_data.extend_from_slice(&16u32.to_le_bytes()); // chunk size
+    wav_data.extend_from_slice(&1u16.to_le_bytes()); // audio format (PCM)
+    wav_data.extend_from_slice(&channels.to_le_bytes());
+    wav_data.extend_from_slice(&sample_rate.to_le_bytes());
+    wav_data.extend_from_slice(&byte_rate.to_le_bytes());
+    wav_data.extend_from_slice(&block_align.to_le_bytes());
+    wav_data.extend_from_slice(&bits_per_sample.to_le_bytes());
+    
+    // data chunk
+    wav_data.extend_from_slice(b"data");
+    wav_data.extend_from_slice(&data_size.to_le_bytes());
+    wav_data.extend_from_slice(pcm_data);
+    
+    Ok(wav_data)
+}
+
+async fn generate_tts(
+    Json(payload): Json<TTSRequest>
+) -> Result<Response<Body>, (StatusCode, AxumJson<ApiError>)> {
+    let gemini_api_key = env::var("GEMINI_API_KEY").map_err(|_| {
+        (StatusCode::INTERNAL_SERVER_ERROR, 
+         AxumJson(ApiError { error: "GEMINI_API_KEY is not configured".to_string() }))
+    })?;
+
+    let client = reqwest::Client::new();
+    let url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent";
+    
+    info!("Generating TTS for text length: {}", payload.text.len());
+    
+    let request_body = serde_json::json!({
+        "contents": [{
+            "parts": [{
+                "text": payload.text
+            }]
+        }],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {
+                        "voiceName": "Kore"
+                    }
+                }
+            }
+        },
+        "model": "gemini-2.5-flash-preview-tts"
+    });
+
+    info!("Request body: {}", serde_json::to_string_pretty(&request_body).unwrap());
+
+    let response = client
+        .post(url)
+        .header("x-goog-api-key", &gemini_api_key)
+        .header("Content-Type", "application/json")
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|e| {
+            error!("TTS request failed: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, 
+             AxumJson(ApiError { error: "Failed to generate TTS".to_string() }))
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_default();
+        error!("TTS API error {}: {}", status, error_text);
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, 
+                   AxumJson(ApiError { error: format!("TTS API error: {}", status) })));
+    }
+
+    let response_text = response.text().await
+        .map_err(|e| {
+            error!("Failed to get response text: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR,
+             AxumJson(ApiError { error: "Failed to read response".to_string() }))
+        })?;
+
+    info!("Got response with length: {}", response_text.len());
+
+    let response_json: serde_json::Value = serde_json::from_str(&response_text)
+        .map_err(|e| {
+            error!("Failed to parse TTS response: {} - Response: {}", e, response_text);
+            (StatusCode::INTERNAL_SERVER_ERROR, 
+             AxumJson(ApiError { error: "Invalid TTS response".to_string() }))
+        })?;
+
+    info!("Parsed JSON response");
+
+    // Extract the base64 audio data
+    let audio_data = response_json
+        .get("candidates")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("content"))
+        .and_then(|c| c.get("parts"))
+        .and_then(|p| p.get(0))
+        .and_then(|p| p.get("inlineData"))
+        .and_then(|d| d.get("data"))
+        .and_then(|d| d.as_str())
+        .ok_or_else(|| {
+            error!("Failed to extract audio data from response: {}", serde_json::to_string_pretty(&response_json).unwrap());
+            (StatusCode::INTERNAL_SERVER_ERROR, 
+             AxumJson(ApiError { error: "No audio data in response".to_string() }))
+        })?;
+
+    info!("Extracted base64 audio data, length: {}", audio_data.len());
+
+    // Decode base64 to bytes (this is raw PCM data)
+    let pcm_bytes = base64::decode(audio_data)
+        .map_err(|e| {
+            error!("Failed to decode base64 audio: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, 
+             AxumJson(ApiError { error: "Invalid audio data".to_string() }))
+        })?;
+
+    info!("Decoded PCM data length: {}", pcm_bytes.len());
+
+    // Convert PCM to WAV format by adding WAV header
+    let wav_bytes = create_wav_from_pcm(&pcm_bytes, 24000, 1, 16)?;
+    
+    info!("Generated WAV data length: {}", wav_bytes.len());
+
+    Ok(Response::builder()
+        .status(200)
+        .header("Content-Type", "audio/wav")
+        .header("Content-Disposition", "attachment; filename=\"podcast-audio.wav\"")
+        .body(Body::from(wav_bytes))
+        .unwrap())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Load environment variables from .env file
@@ -777,6 +933,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/metadata", get(get_website_metadata))
         .route("/api/podcast/generate", post(generate_podcast))
         .route("/api/v1/chat/generate/stream", post(generate_stream))
+        .route("/api/tts/generate", post(generate_tts))
         .layer(
             CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
